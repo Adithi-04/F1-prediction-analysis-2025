@@ -33,24 +33,24 @@ Predictions are generated for all races and visualized with feature importance t
 
 1. Clone the repository
 
-  
+  ```bash
    git clone https://github.com/yourusername/f1-race-predictor.git
    cd f1-race-predictor
-  
+  ```
 
 2. Create a virtual environment and install requirements
 
-
+```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    pip install -r requirements.txt
-   
+   ```
 
 3. Run prediction script
 
-   
+   ```bash
    python 2025-gp/4.bahraingp.py
-   
+   ```
 
 ## 📌 Dataset Sources
 
