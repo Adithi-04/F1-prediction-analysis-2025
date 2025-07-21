@@ -1,150 +1,130 @@
 import fastf1
 import pandas as pd
 import numpy as np
-
-from sklearn.model_selection import train_test_split, TimeSeriesSplit, GridSearchCV
-from sklearn.ensemble import GradientBoostingRegressor, StackingRegressor
+import requests
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
-from xgboost import XGBRegressor
-from lightgbm import LGBMRegressor
+import matplotlib.pyplot as plt
+from sklearn.impute import SimpleImputer
 
-# Enable FastF1 caching
 fastf1.Cache.enable_cache("f1_cache")
 
-# ========== 1. LOAD HISTORICAL DATA ==========
-# Load 2024 Miami GP race session
+# load the 2024 miami session data
 session_2024 = fastf1.get_session(2024, "Miami", "R")
 session_2024.load()
 laps_2024 = session_2024.laps[["Driver", "LapTime", "Sector1Time", "Sector2Time", "Sector3Time"]].copy()
 laps_2024.dropna(inplace=True)
 
-
-# Convert times to seconds
+# convert lap and sector times to seconds
 for col in ["LapTime", "Sector1Time", "Sector2Time", "Sector3Time"]:
     laps_2024[f"{col} (s)"] = laps_2024[col].dt.total_seconds()
 
-# Group by driver to get average sector times per driver
-sector_times_2024 = laps_2024.groupby("Driver")[["Sector1Time (s)", "Sector2Time (s)", "Sector3Time (s)"]].mean().reset_index()
+# aggregate sector times by driver
+sector_times_2024 = laps_2024.groupby("Driver").agg({
+    "Sector1Time (s)": "mean",
+    "Sector2Time (s)": "mean",
+    "Sector3Time (s)": "mean"
+}).reset_index()
 
-# ========== 2. 2025 QUALIFYING DATA (hypothetical) ==========
+sector_times_2024["TotalSectorTime (s)"] = (
+    sector_times_2024["Sector1Time (s)"] +
+    sector_times_2024["Sector2Time (s)"] +
+    sector_times_2024["Sector3Time (s)"]
+)
+
+clean_air_race_pace = {
+    "VER": 93.191067, "HAM": 94.020622, "LEC": 93.418667, "NOR": 93.428600, "ALO": 94.784333,
+    "PIA": 93.232111, "RUS": 93.833378, "SAI": 94.497444, "STR": 95.318250, "HUL": 95.345455,
+    "OCO": 95.682128
+}
+
+# add quali data on Saturday for Miami GP 2025
 qualifying_2025 = pd.DataFrame({
-    "Driver": ["Oscar Piastri", "George Russell", "Lando Norris", "Max Verstappen", "Lewis Hamilton",
-               "Charles Leclerc", "Isack Hadjar", "Andrea Kimi Antonelli", "Yuki Tsunoda", "Alexander Albon",
-               "Esteban Ocon", "Nico Hülkenberg", "Fernando Alonso", "Lance Stroll", "Carlos Sainz Jr.",
-               "Pierre Gasly", "Oliver Bearman", "Jack Doohan", "Gabriel Bortoleto", "Liam Lawson"],
-    "QualifyingTime (s)": [86.375, 86.385, 86.269, 86.204, 87.006,
-                           86.754, 86.987, 86.271, 86.943, 86.682,
-                           86.824, 87.473, 87.604, 87.830, 86.569,
-                           87.710, 87.999, 87.186, 87.151, 87.363]
+    "Driver": ["VER", "NOR", "PIA", "RUS", "SAI", "ALB", "LEC", "OCO",
+               "TSU", "HAM", "STR", "GAS", "ALO", "HUL"],
+    "QualifyingTime (s)": [86.204, 86.269, 86.375, 86.385, 86.569, 86.682,
+                           86.754, 86.824, 86.943, 87.006, 87.830, 87.710, 87.604, 87.473]
 })
 
-# Add constructor (team) information
-constructor_mapping = {
-    "Oscar Piastri": "McLaren", "George Russell": "Mercedes", "Lando Norris": "McLaren", "Max Verstappen": "Red Bull",
-    "Lewis Hamilton": "Ferrari", "Charles Leclerc": "Ferrari", "Isack Hadjar": "Racing Bulls Honda RBPT", 
-    "Andrea Kimi Antonelli": "Mercedes", "Yuki Tsunoda": "Red Bull", "Alexander Albon": "Williams",
-    "Esteban Ocon": "Haas", "Nico Hülkenberg": "Kick Sauber", "Fernando Alonso": "Aston Martin", 
-    "Lance Stroll": "Aston Martin", "Carlos Sainz Jr.": "Williams", "Pierre Gasly": "Alpine",
-    "Oliver Bearman": "Haas", "Jack Doohan": "Alpine", "Gabriel Bortoleto": "Kick Sauber", "Liam Lawson": "Racing Bulls Honda RBPT"
+
+qualifying_2025["CleanAirRacePace (s)"] = qualifying_2025["Driver"].map(clean_air_race_pace)
+
+# get weather data for miami
+API_KEY = "YOURAPIKEY"
+weather_url = f"http://api.openweathermap.org/data/2.5/forecast?lat=25.7617&lon=-80.1918&appid={API_KEY}&units=metric"
+response = requests.get(weather_url)
+weather_data = response.json()
+forecast_time = "2025-05-04 13:00:00"
+forecast_data = next((f for f in weather_data["list"] if f["dt_txt"] == forecast_time), None)
+
+rain_probability = forecast_data["pop"] if forecast_data else 0
+temperature = forecast_data["main"]["temp"] if forecast_data else 20
+
+# adjust qualifying time based on weather conditions
+if rain_probability >= 0.75:
+    qualifying_2025["QualifyingTime"] = qualifying_2025["QualifyingTime (s)"] * qualifying_2025["WetPerformanceFactor"]
+else:
+    qualifying_2025["QualifyingTime"] = qualifying_2025["QualifyingTime (s)"]
+
+# add constructor's data
+team_points = {
+    "McLaren": 203, "Mercedes": 118, "Red Bull": 92, "Williams": 25, "Ferrari": 84,
+    "Haas": 20, "Aston Martin": 14, "Kick Sauber": 6, "Racing Bulls": 8, "Alpine": 7
 }
-qualifying_2025["Constructor"] = qualifying_2025["Driver"].map(constructor_mapping)
+max_points = max(team_points.values())
+team_performance_score = {team: points / max_points for team, points in team_points.items()}
 
-# Define constructor points (hypothetical)
-constructor_points = {
-    "Red Bull": 92, "Mercedes": 118, "Ferrari": 84, "Aston Martin": 14, "Alpine": 7,
-    "McLaren": 203, "Haas": 20, "Racing Bulls Honda RBPT": 8, "Williams": 25, "Kick Sauber": 6
+driver_to_team = {
+    "VER": "Red Bull", "NOR": "McLaren", "PIA": "McLaren", "LEC": "Ferrari", "RUS": "Mercedes",
+    "HAM": "Mercedes", "GAS": "Alpine", "ALO": "Aston Martin", "TSU": "Racing Bulls",
+    "SAI": "Ferrari", "HUL": "Kick Sauber", "OCO": "Alpine", "STR": "Aston Martin"
 }
-qualifying_2025["ConstructorPoints"] = qualifying_2025["Constructor"].map(constructor_points)
 
-# Map full names to FastF1 3-letter codes
-driver_mapping = {
-    "Oscar Piastri": "PIA", "George Russell": "RUS", "Lando Norris": "NOR", "Max Verstappen": "VER",
-    "Lewis Hamilton": "HAM", "Charles Leclerc": "LEC", "Isack Hadjar": "HAD", "Andrea Kimi Antonelli": "ANT",
-    "Yuki Tsunoda": "TSU", "Alexander Albon": "ALB", "Esteban Ocon": "OCO", "Nico Hülkenberg": "HUL",
-    "Fernando Alonso": "ALO", "Lance Stroll": "STR", "Carlos Sainz Jr.": "SAI", "Pierre Gasly": "GAS",
-    "Oliver Bearman": "BEA", "Jack Doohan": "DOO", "Gabriel Bortoleto": "BOR", "Liam Lawson": "LAW"
-}
-qualifying_2025["DriverCode"] = qualifying_2025["Driver"].map(driver_mapping)
+qualifying_2025["Team"] = qualifying_2025["Driver"].map(driver_to_team)
+qualifying_2025["TeamPerformanceScore"] = qualifying_2025["Team"].map(team_performance_score)
 
-# ========== 3. FEATURE ENGINEERING ==========
-# Merge qualifying data with sector times
-merged_data = qualifying_2025.merge(sector_times_2024, left_on="DriverCode", right_on="Driver", how="left")
+# merge qualifying and sector times data
+merged_data = qualifying_2025.merge(sector_times_2024[["Driver", "TotalSectorTime (s)"]], on="Driver", how="left")
+merged_data["RainProbability"] = rain_probability
+merged_data["Temperature"] = temperature
+merged_data["LastYearWinner"] = (merged_data["Driver"] == "VER").astype(int)
+merged_data["QualifyingTime"] = merged_data["QualifyingTime"] ** 2
 
-# Feature: Sector variance (consistency)
-merged_data["SectorVariance"] = merged_data[["Sector1Time (s)", "Sector2Time (s)", "Sector3Time (s)"]].var(axis=1)
+# define features (X) and target (y)
+X = merged_data[[
+    "QualifyingTime", "RainProbability", "Temperature", "TeamPerformanceScore", 
+    "CleanAirRacePace (s)"
+]]
+y = laps_2024.groupby("Driver")["LapTime (s)"].mean().reindex(merged_data["Driver"])
 
-# Example pit stop data (could be improved with real stats)
-pit_data = {
-    "Constructor": ["Red Bull", "Mercedes", "Ferrari", "Aston Martin", "Alpine", "McLaren", "Haas", "Racing Bulls Honda RBPT", "Williams", "Kick Sauber"],
-    "AvgPitTime": [2.3, 2.5, 2.4, 2.6, 2.7, 2.35, 2.55, 2.65, 2.6, 2.7]
-}
-pit_df = pd.DataFrame(pit_data)
-merged_data = merged_data.merge(pit_df, on="Constructor", how="left")
+# impute missing values for features
+imputer = SimpleImputer(strategy="median")
+X_imputed = imputer.fit_transform(X)
 
-# ========== 4. PREPARE TRAINING DATA ==========
-# Target: average race lap time per driver
-y = laps_2024.groupby("Driver")["LapTime (s)"].mean().reset_index()["LapTime (s)"]
+# train-test split
+X_train, X_test, y_train, y_test = train_test_split(X_imputed, y, test_size=0.2, random_state=38)
 
-# Features for model
-feature_cols = [
-    "QualifyingTime (s)",
-    "Sector1Time (s)", "Sector2Time (s)", "Sector3Time (s)",
-    "SectorVariance",
-    "ConstructorPoints",
-    "AvgPitTime"
-]
-X = merged_data[feature_cols].fillna(0)
+# train gradient boosting model
+model = GradientBoostingRegressor(n_estimators=300, learning_rate=0.05, max_depth=5, random_state=38)
+model.fit(X_train, y_train)
+merged_data["PredictedRaceTime (s)"] = model.predict(X_imputed)
 
-# ========== 5. MODEL STACKING & TRAINING ==========
-# Define base models
-estimators = [
-    ('xgb', XGBRegressor(objective='reg:squarederror', random_state=42)),
-    ('lgbm', LGBMRegressor(random_state=42))
-]
-stack_model = StackingRegressor(
-    estimators=estimators,
-    final_estimator=GradientBoostingRegressor(n_estimators=200, learning_rate=0.1, random_state=42)
-)
+# sort the results to find the predicted winner
+final_results = merged_data.sort_values("PredictedRaceTime (s)")
+print("\n🏁 Predicted 2025 Miami GP Winner 🏁\n")
+print(final_results[["Driver", "PredictedRaceTime (s)"]])
+y_pred = model.predict(X_test)
+print(f"Model Error (MAE ): {mean_absolute_error(y_test, y_pred):.2f} seconds")
 
-# TimeSeries split (for robustness)
-tscv = TimeSeriesSplit(n_splits=5)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=38)
-
-# Fit model
-stack_model.fit(X_train, y_train)
-
-# ========== 6. PREDICT & RANK ==========
-predicted_race_times = stack_model.predict(X)
-qualifying_2025["PredictedRaceTime (s)"] = predicted_race_times
-
-# Rank drivers by predicted race time
-qualifying_2025 = qualifying_2025.sort_values(by="PredictedRaceTime (s)").reset_index(drop=True)
-qualifying_2025["Position"] = qualifying_2025.index + 1
-qualifying_2025["Position"] = qualifying_2025["Position"].apply(
-    lambda x: f"{x}{'st' if x == 1 else 'nd' if x == 2 else 'rd' if x == 3 else 'th'}"
-)
-
-# ========== 7. MONTE CARLO SIMULATION ==========
-# (Optional: to estimate uncertainty)
-num_simulations = 1000
-sim_results = np.zeros((num_simulations, len(predicted_race_times)))
-
-for i in range(num_simulations):
-    noise = np.random.normal(1, 0.01, len(predicted_race_times))
-    sim_times = predicted_race_times * noise
-    sim_results[i, :] = np.argsort(np.argsort(sim_times)) + 1  # 1 = best
-
-# Calculate probabilities of podium finish
-podium_probs = (sim_results <= 3).mean(axis=0)
-qualifying_2025["PodiumChance (%)"] = (podium_probs * 100).round(1)
-
-# ========== 8. OUTPUT & EVALUATION ==========
-print("\n🏁 Predicted 2025 Miami GP Results (Stacked Model, Monte Carlo) 🏁\n")
-print(qualifying_2025[["Position", "Driver", "Constructor", "PredictedRaceTime (s)", "ConstructorPoints", "PodiumChance (%)"]])
-
-# Evaluate model
-y_pred = stack_model.predict(X_test)
-print(f"\n🔍 Model Error (MAE): {mean_absolute_error(y_test, y_pred):.2f} seconds")
-
-# ========== 9. (Optional) EXPORT ==========
-# qualifying_2025.to_csv("predicted_2025_miami_gp.csv", index=False)
+# plot effect of clean air race pace
+plt.figure(figsize=(12, 8))
+plt.scatter(final_results["CleanAirRacePace (s)"], final_results["PredictedRaceTime (s)"])
+for i, driver in enumerate(final_results["Driver"]):
+    plt.annotate(driver, (final_results["CleanAirRacePace (s)"].iloc[i], final_results["PredictedRaceTime (s)"].iloc[i]),
+                 xytext=(5, 5), textcoords='offset points')
+plt.xlabel("clean air race pace (s)")
+plt.ylabel("predicted race time (s)")
+plt.title("effect of clean air race pace on predicted race results")
+plt.tight_layout()
+plt.show()

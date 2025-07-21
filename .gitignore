@@ -1,12 +1,9 @@
-# Ignore virtual environment
 venv/
 
-# Ignore FastF1 cache
 f1_cache/
 *.ff1pkl
 *.sqlite
 
-# Ignore large binaries
 *.dylib
 *.so
 fastf1_http_cache.sqlite/
